@@ -19,359 +19,16 @@
 #define MAX_PIPE 20
 #define TOKEN_DELIM "\t\r\n\a "
 
-/**
- * Execute non-builtin commands from child processes in shell
- */
 
+ extern char** environ;
  
-void execute_process(char** args)
-{
-    // Check if background execution is required
-    // Parse command arguments into separate char**
-    bool is_background = false;
-    int num_pipes = 0;
-    int num_io_redirect = 0;
-
-    int num_args;
-    for (num_args = 0; args[num_args] != NULL; num_args++);
-    num_args -= 1;
-
-    // Parse arguments for background process execution
-    char* tmp_arg = args[num_args];
-    if (tmp_arg[strlen(tmp_arg) - 1] == '&')
-    {
-        is_background = true;
-        tmp_arg[strlen(tmp_arg) - 1] = '\0';
-
-        if (strlen(tmp_arg) == 0)
-        {
-            args[num_args] = NULL;
-            num_args--;
-        }
-        else
-            args[num_args] = tmp_arg;
-    }
-
-    // Check for piping and io redirection in command arguments
-    for (int i = 0; i < num_args; i++)
-    {
-        if (strcmp(args[i], "|") == 0)
-            num_pipes += 1;
-
-        else if (strcmp(args[i], "<") == 0 || strcmp(args[i], ">") == 0)
-            num_io_redirect += 1;
-    }
-
-    // Handle pipes for input output redirection
-    if (num_pipes > 0 && num_args >= 2)
-    {
-        // Parse arguments of each command separately
-        char* command_args[TOKEN_NUM][TOKEN_NUM];
-        int num_command = 0;
-        int num_arg = 0;
-        for (int i = 0; i <= num_args; i++)
-        {
-            if (strcmp(args[i], "|") == 0)
-            {
-                // Terminate individual command
-                command_args[num_command][num_arg] = NULL;
-                num_command++;
-                num_arg = 0;
-            }
-
-            else
-            {
-                command_args[num_command][num_arg] = args[i];
-                num_arg++;
-            }
-        }
-
-        // Create pipes for each executable command
-        int pipe_fd[MAX_PIPE][2];
-        for (int i = 0; i < num_pipes; i++)
-        {
-            if (pipe(pipe_fd[i]) == -1)
-            {
-                perror(args[0]);
-                return;
-            }
-        }
-
-        int pid;
-        // Execute commands with input output piping
-        for (int i = 0; i <= num_pipes; i++)
-        {
-            pid = fork();
-            if (pid == 0)
-            {
-                // First command - before first pipe
-                if (i == 0)
-                {
-                    close(pipe_fd[i][0]);
-                    close(1); // 1 : stdout
-                    dup(pipe_fd[i][1]);
-                    close(pipe_fd[i][1]);
-                    if (execvp(command_args[i][0], command_args[i]))
-                    {
-                        perror(command_args[i][0]);
-                        return;
-                    }
-                }
-
-                // Last command - after last pipe
-                else if (i == num_pipes)
-                {
-                    close(pipe_fd[i - 1][1]);
-                    close(0); // 0 : stdin
-                    dup(pipe_fd[i - 1][0]);
-                    close(pipe_fd[i - 1][0]);
-                    if (execvp(command_args[i][0], command_args[i]))
-                    {
-                        perror(command_args[i][0]);
-                        return;
-                    }
-                }
-
-                // Other commands - redirecting input output on both ends
-                else
-                {
-                    close(pipe_fd[i - 1][1]);
-                    close(0); // 0 : stdin
-                    dup(pipe_fd[i - 1][0]);
-                    close(pipe_fd[i - 1][0]);
-
-                    close(pipe_fd[i][0]);
-                    close(1); // 1 : stdout
-                    dup(pipe_fd[i][1]);
-                    close(pipe_fd[i][1]);
-
-                    if (execvp(command_args[i][0], command_args[i]))
-                    {
-                        perror(command_args[i][0]);
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Close all pipes
-        for (int j = 0; j < num_pipes; j++)
-        {
-            close(pipe_fd[j][0]);
-            close(pipe_fd[j][1]);
-        }
-
-        // Wait for all child processes to end
-        while (true)
-        {
-            waitpid(-1, NULL, 0);
-            if (errno == ECHILD)
-                break;
-        }
-
-        for (int k = 0; k < num_pipes; k++)
-            wait(NULL);
-        return;
-    }
-
-    // Handle input output file redirection
-    else if (num_io_redirect > 0 && num_args >= 2)
-    {
-        num_args++; // Offset num_args from maximum arg index value by 1
-        if (strcmp(args[num_args - 2], ">") == 0)
-        {
-            // Read from file not required
-            if (((num_args > 4) && (strcmp(args[num_args - 4], "<") != 0)) || (num_args < 4))
-            {
-                int pid = fork();
-                if (pid == 0)
-                {
-                    // Open write-to file
-                    int fd_write = open(args[num_args - 1], O_WRONLY | O_CREAT | O_TRUNC,
-                                        S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
-                    if (fd_write == -1)
-                    {
-                        perror(args[0]);
-                        return;
-                    }
-
-                    close(1); // 1 : stdout
-                    dup(fd_write);
-                    close(fd_write);
-
-                    // Terminate args list with NULL
-                    args[num_args - 2] = NULL;
-                    if (execvp(args[0], args))
-                    {
-                        perror(args[0]);
-                    }
-                }
-                else
-                {
-                    int status;
-                    waitpid(pid, &status, 0);
-                }
-            }
-
-            // Redirect both read and write to files
-            else if (strcmp(args[num_args - 4], "<") == 0)
-            {
-                int pid = fork();
-                if (pid == 0)
-                {
-                    int fd_read = open(args[num_args - 3], O_RDONLY);
-                    if (fd_read == -1)
-                    {
-                        perror(args[0]);
-                        return;
-                    }
-
-                    close(0);  // 0 : stdin
-                    dup(fd_read);
-                    close(fd_read);
-
-                    int fd_write = open(args[num_args - 1], O_WRONLY | O_CREAT | O_TRUNC,
-                                        S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
-                    if (fd_write == -1)
-                    {
-                        perror(args[0]);
-                        return;
-                    }
-
-                    close(1); // 1 : stdout
-                    dup(fd_write);
-                    close(fd_write);
-
-                    // Terminate args list with NULL
-                    args[num_args - 4] = NULL;
-                    if (execvp(args[0], args))
-                    {
-                        perror(args[0]);
-                    }
-                }
-                else
-                {
-                    int status;
-                    waitpid(pid, &status, 0);
-                }
-            }
-        }
-
-        // Handle reversed order of read and write redirection
-        else if (strcmp(args[num_args - 2], "<") == 0)
-        {
-            // Read from file not required
-            if (((num_args > 4) && (strcmp(args[num_args - 4], ">") != 0)) || (num_args < 4))
-            {
-                int pid = fork();
-                if (pid == 0)
-                {
-                    // Open write-to file
-                    int fd_read = open(args[num_args - 1], O_RDONLY);
-                    if (fd_read == -1)
-                    {
-                        perror(args[0]);
-                        return;
-                    }
-
-                    close(0); // 0 : stdout
-                    dup(fd_read);
-                    close(fd_read);
-
-                    // Terminate args list with NULL
-                    args[num_args - 2] = NULL;
-                    if (execvp(args[0], args))
-                    {
-                        perror(args[0]);
-                    }
-                }
-                else
-                {
-                    int status;
-                    waitpid(pid, &status, 0);
-                }
-            }
-
-            // Redirect both read and write to files
-            else if (strcmp(args[num_args - 4], ">") == 0)
-            {
-                int pid = fork();
-                if (pid == 0)
-                {
-                    int fd_read = open(args[num_args - 1], O_RDONLY);
-                    if (fd_read == -1)
-                    {
-                        perror(args[0]);
-                        return;
-                    }
-
-                    close(0);  // 0 : stdin
-                    dup(fd_read);
-                    close(fd_read);
-
-                    int fd_write = open(args[num_args - 3], O_WRONLY | O_CREAT | O_TRUNC,
-                                        S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
-                    if (fd_write == -1)
-                    {
-                        perror(args[0]);
-                        return;
-                    }
-
-                    close(1); // 1 : stdout
-                    dup(fd_write);
-                    close(fd_write);
-
-                    // Terminate args list with NULL
-                    args[num_args - 4] = NULL;
-                    if (execvp(args[0], args))
-                    {
-                        perror(args[0]);
-                    }
-                }
-                else
-                {
-                    int status;
-                    waitpid(pid, &status, 0);
-                }
-            }
-        }
-    }
-
-    // Handle other processes
-    else
-    {
-        int pid = fork();
-        if (pid == 0)
-        {
-            if (execvp(args[0], args))
-            {
-                perror(args[0]);
-                exit(EXIT_FAILURE);
-            }
-        }
-
-        // Parent process - wait for child to finish if '&' not provided
-        else
-        {
-            int status;
-            if (is_background != true)
-                waitpid(pid, &status, 0);
-        }
-    }
-}
-
-
-/**
- * Execute parsed command arguments
- * Create child processes for non-inbuilt commands
- */
 int execute_command(char** args)
 {  
     if (args[0] == NULL)
     {
         return 0;
     }
-
+     
     // pwd: print current directory
     if (strcmp(args[0], "pwd") == 0)
     {
@@ -587,26 +244,45 @@ int execute_command(char** args)
     else if(strcmp(args[0],"run") == 0 && strcmp(args[1],"fg") == 0){
         printf("Root process: %d\n",getpid());
         pid_t child_pid;
+        pid_t child;
         int status;
-        
         child_pid= fork();
+        if (child_pid< 0) {
+        // Fork failed
+        perror("Fork failed");
+        exit(1);
+    }
        
-            if(child_pid==0){
+        if(child_pid==0){
+               child= getpid();
                printf("child process!\n");
-               printf("child PID =  %d, parent pid = %d\n", getpid(), getppid());
-               
-               return execv(args[2],args);}
-            else if (child_pid==-1){   
-            perror("Error while creating a new process");
-            }  
-             while (wait(NULL) >= 0);
-          
-          
-
+               printf("child PID =  %d, parent pid = %d\n", child, getppid());
+               if( execv(args[2],args)<0){
+                    perror("Execv failed");
+                     exit(1);
+               }}else{
+                  
+         
+             while (1) {
+            char c;
+            scanf("%c", &c);
+            if (c == 'c') {
+                kill(child_pid, SIGTERM);
+                break;
             }
+            if(waitpid(child,&status,WNOHANG)!=0){
+                break;
+            }
+        }
+
+        // Wait for the child process to terminate
+        waitpid(child_pid, &status, 0);
+           
+                 
+            }}
 
      else if(strcmp(args[0],"run") == 0 && strcmp(args[1],"bg") == 0){
-        printf("Root process: %d\n",getpid());
+       printf("Root process: %d\n",getpid());
         pid_t child_pid;
         int status;
        
@@ -617,30 +293,24 @@ int execute_command(char** args)
             }  
        
             if(child_pid==0){
-                  printf("child process!\n");
+                 
                   pid_t processID= getpid();
                   pid_t parentId= getppid();
                   FILE *file;
                   file= fopen("bg.txt","a");
                   if (file == NULL) {
                      printf("Unable to open the file.\n");
+                     fclose(file);
                      exit(1);
                        }
                   fprintf(file,"%d\n",processID);
                  fclose(file);
                printf("child PID =  %d, parent pid = %d\n", processID, parentId);
-               
-              setpgid(processID,processID);
-               execv(args[2],args);
+             if(  execv(args[2],args)<0){
                 perror("Exec failed");
                  exit(1);
-               }
-            else{
-                 printf("Parent process continuing execution.\n");
-                 
-        
-    }
-
+               }}
+            
     return 0;
 }
    else if(strcmp(args[0],"print") == 0 && strcmp(args[1],"bg") == 0){
@@ -651,15 +321,32 @@ int execute_command(char** args)
         exit(1);
     }
      char line[20];
+     printf("PID         Status     CMD\n");
      while(fgets(line,sizeof(line),file)!=NULL){
-         printf("%s",line);
+         int status;
+         pid_t pid= atoi(line);
+        if( waitpid(pid,&status,WNOHANG)!=0)
+                continue;
+         char path[256];
+         snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+         char path1[256];
+         snprintf(path1, sizeof(path1), "/proc/%d/exe", pid);
+         FILE * file1= fopen (path,"r");
+         if(file1==NULL){
+             perror("Failed to open file");
+             return 1;
+         }
+         char cmdName[256];
+         ssize_t length = readlink(path1, cmdName, sizeof(cmdName) - 1);
+         cmdName[length]='\0';
+         char cmdline[256];
+         fgets(cmdline,sizeof(cmdline),file1);
+         printf("%d         %s     %s\n",pid,cmdline,cmdName );
 
      }
+     fclose(file);
    }
                    
-
-            
-
     else if(strcmp(args[0],"list") == 0 && strcmp(args[1],"bg") == 0){
         FILE *file;
         file=popen("ps","r");
@@ -679,6 +366,8 @@ int execute_command(char** args)
     }
     else if(strcmp(args[0],"kill") ==0){
          pid_t processId= atoi (args[1]);
+         pid_t root= getpid();
+         if(root!=processId){
          kill(processId,SIGSEGV);
          int status;
          int i=0;
@@ -718,6 +407,19 @@ int execute_command(char** args)
                  break;
             }
             
+            }}
+            else {
+                FILE *file;
+                file= fopen("bg.txt","r");
+                char line[30];
+                while(fgets(line,sizeof(line),file)!=NULL){
+                       pid_t childid= atoi(line);
+                       kill(childid,SIGSEGV);                      
+                }
+                fclose(file);
+                file=fopen("bg.txt","w");
+                fclose(file);
+                exit(EXIT_SUCCESS);
             }
     }
     else if (strcmp(args[0],"stop") ==0){
@@ -744,11 +446,98 @@ int execute_command(char** args)
          }
 
     }
-    // Handle all other commands
-    else
-    {
-        execute_process(args);
+       else if(strcmp(args[0],"help") ==0){
+         printf("***********************Welcome to my shell**********************************\n");
+         printf("1. run fg -program.bin : run a bin file in foreground\n");
+         printf("2. run bg -program.bin : run a bin file in background\n");
+         printf("3. kill -PID           : kill a chill background process\n");
+         printf("4. stop -PID           : stop a chill background process\n");
+         printf("5. resume -PID         : resume a chill background process\n");
+         printf("6. print bg            : show child bg process of this shell\n");
+         printf("7. ls                  : list file in this folder\n");
+         printf("8. ls -l               : list file in this folder with more information\n");
+         printf("9. cp                  : copy file\n");
+         printf("10.list bg             : print all child process of this terminal\n");
+         printf("11.cp                  : coppy file\n");
+         printf("12.exit                : exit shell\n");
+         printf("13.date                : print date \n");
+         printf("14.time                : print time\n");
+         printf("15.cp -file1 -file2    : create file2 coppy of file1\n");
+         printf("16.mkdir -dir -[dirN]  : create new directories\n");
+         printf("17.rmdir -dir -[dirN]  : remove directories\n");
+         printf("18.cd -[dir]           : change directory\n");
+         printf("19.pwd                 : print current directory\n");
+         printf("20.print environ       : print environment variable\n");
+         printf("21.set environ -name -value :set new value for environment varriable\n");
+         printf("22.cat -file           : print content of file into screen\n");
+         printf("---------------------------------------------------------------------------\n");
+       }
+  
+     else if (strcmp(args[0],"date") ==0){
+          time_t currentTime;
+    struct tm* timeInfo;
+    char buffer[80];
+
+    // Get current time
+    currentTime = time(NULL);
+    timeInfo = localtime(&currentTime);
+
+    // Format the date string
+    strftime(buffer, sizeof(buffer), "%d-%m-%Y", timeInfo);
+
+    // Print the date
+    printf("Current date: %s\n", buffer);
+     }
+    else if(strcmp(args[0],"time") ==0){
+        time_t currentTime;
+
+    // Get current time
+    currentTime = time(NULL);
+
+    // Convert to local time string
+    char* timeString = ctime(&currentTime);
+
+    // Print the current time
+    printf("Current time: %s\n", timeString);
     }
+    else if(strcmp(args[0],"print") ==0 && strcmp(args[1],"environ") ==0){
+                char** env = environ;
+                  while (*env != NULL) {
+                 printf("%s\n", *env);
+                env++;
+    }
+    }
+    else if (strcmp(args[0],"set")==0 && strcmp(args[1],"environ")==0){
+          char* oldValue= getenv(args[2]);
+          printf("Old value of environment variable:%s\n",oldValue);
+          if (setenv(args[2], args[3], 1) == 0) {
+          printf("MY_VARIABLE set successfully\n");
+       } else {
+          printf("Failed to set MY_VARIABLE\n");
+    }
+    char* newValue = getenv(args[2]);
+    printf("New value of MY_VARIABLE: %s\n", newValue);
+    }
+    else if (strcmp(args[0],"cat")==0){
+       FILE *file;
+       file=  fopen(args[1],"r");
+       if(file==NULL){
+           fclose(file);
+           printf("can't open file!\n");
+           exit(1);
+       }
+       char line[30];
+       while(fgets(line,sizeof(line),file)!=NULL){
+           if(line[strlen(line)-1]=='\n')
+              line[strlen(line)-1]='\0';
+             printf("%s\n",line);
+            
+           // int status = execute_command(parse_command(command));
+       }
+       
+       fclose(file);
+    }
+
 
     return 0;
 }
@@ -787,10 +576,7 @@ char** parse_command(char* command)
     return args;
 }
 
-/**
- * Run shell loop, get command line input
- * Parse and execute various commands
- */
+
 void init_shell()
 {
     char cwd[PATH_LEN]; // Current working directory
@@ -802,7 +588,7 @@ void init_shell()
         
         if (getcwd(cwd, sizeof(cwd)) != NULL)
         {
-            printf("init_shell -- %s> ", cwd);
+            printf("%s> ", cwd);
         
         }
         else
@@ -816,18 +602,16 @@ void init_shell()
         parsed_command = parse_command(command);
         int status = execute_command(parsed_command);
 
-       // free(command);
-        //free(parsed_command);
-
+        free(command);
+        free(parsed_command);
+        
         // Execute command fails/error occurs
         if (status == -1)
             exit(EXIT_FAILURE);
     }
 }
 
-/**
- * Main function - start the shell and wait for input
- */
+
 int main(int argc, char* argv[])
 {  
     
